@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-// C-429: everything in src/ runs on the phone (expo-sqlite, Hermes) and moves to its own repository one day, so it
+// C-429: everything in src/ runs on the phone (expo-sqlite, Hermes) and every app pins it by tag (C-435), so it
 // imports nothing from Node, nothing from the companion, and no package at all -- only its own files.
 const SRC = fileURLToPath(new URL("../src", import.meta.url));
 const files = readdirSync(SRC).filter((f) => f.endsWith(".ts"));

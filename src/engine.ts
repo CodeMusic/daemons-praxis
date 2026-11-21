@@ -13,7 +13,7 @@
 // Sync is the exchange at the end of this file: "here is what I have seen; send me the rest" (exchange.ts runs it).
 
 import type { Db, Statement } from "./db.js";
-import { checkChange, checkEvent, isLong, NAME, PROPOSABLE, type Op, type PxEvent } from "./events.js";
+import { checkChange, checkEnvelope, checkEvent, FORMAT, formatOf, isLong, NAME, PROPOSABLE, type Op, type PxEvent } from "./events.js";
 import { checkForm, checkValue, CORE, LINK_TYPES, PREFIX, SHORT, type Form, type Phase } from "./form.js";
 import { Clock, hlcIso, parseHlc } from "./hlc.js";
 import { cryptoRandom, derivedId, uuidv7, type Random } from "./ids.js";
@@ -61,7 +61,9 @@ export interface Proposal {
 }
 /** what a replica has seen: for each space, the latest time it holds from each replica */
 export type Have = Record<string, Record<string, string>>;
-export interface Received { applied: number; known: number; rejected: number }
+/** what receive() did with what it was sent: folded, held already, refused, and kept but of a newer FORMAT than this
+ *  build folds (C-435) -- sent on as it came, and folded once a build that reads it opens the database */
+export interface Received { applied: number; known: number; rejected: number; newer: number }
 
 type Made = { space: string; kind: string; hlc: string; actor: string };
 type Row = Record<string, any>;
@@ -72,7 +74,7 @@ const byHlc = (a: { hlc: string } | Row, b: { hlc: string } | Row) => (a.hlc < b
 const cut = (s: string, n: number) => Array.from(s).slice(0, n).join("");
 const str = (v: unknown) => (typeof v === "string" ? v : null);
 const eventOf = (r: Row): PxEvent => {
-  const e: PxEvent = { id: r.id, space: r.space, item: r.item, op: r.op, actor: r.actor, replica: r.replica, hlc: r.hlc };
+  const e: PxEvent = { v: r.v, id: r.id, space: r.space, item: r.item, op: r.op, actor: r.actor, replica: r.replica, hlc: r.hlc };
   if (r.field !== null) e.field = r.field;
   if (r.value !== null) e.value = JSON.parse(r.value);
   return e;
@@ -91,6 +93,9 @@ export class Praxis {
     // C-430: px_kinds from before kinds had prefixes -- the column added, and the fold made again to fill it
     const before = !(db.prepare("PRAGMA table_info(px_kinds)").all() as Row[]).some((c) => c.name === "prefix");
     if (before) db.exec("ALTER TABLE px_kinds ADD COLUMN prefix TEXT");
+    // C-435: a log from before events carried their format -- every event in it is format 1
+    if (!(db.prepare("PRAGMA table_info(px_events)").all() as Row[]).some((c) => c.name === "v"))
+      db.exec("ALTER TABLE px_events ADD COLUMN v INTEGER NOT NULL DEFAULT 1");
     const now = opts.now ?? Date.now;
     this.newId = uuidv7(now, opts.random ?? cryptoRandom);
     const kept = this.one("SELECT value FROM px_meta WHERE key = 'replica'")?.value as string | undefined;
@@ -103,7 +108,14 @@ export class Praxis {
     this.clock = new Clock(this.replica, now);
     const last = this.one("SELECT MAX(hlc) AS h FROM px_events")?.h as string | null | undefined;
     if (last) this.clock.observe(last);
-    if (before) this.rebuild();
+    // C-435: a build that reads another FORMAT than the one that last opened this database folds again when the log
+    // holds an event that only one of the two reads: one this build kept unfolded until now, or (after going back to
+    // an older build) one a newer build folded
+    const noted = this.one("SELECT value FROM px_meta WHERE key = 'format'")?.value as string | undefined;
+    const was = Number(noted ?? 1);    // a database from before the format was noted was opened by a format 1 build
+    const moved = was !== FORMAT && !!this.one("SELECT 1 FROM px_events WHERE v > ? LIMIT 1", Math.min(was, FORMAT));
+    if (noted !== String(FORMAT)) this.run("INSERT OR REPLACE INTO px_meta (key, value) VALUES ('format', ?)", String(FORMAT));
+    if (before || moved) this.rebuild();
   }
 
   // ---- the database --------------------------------------------------------------------------------------------------
@@ -131,22 +143,23 @@ export class Praxis {
 
   /** a change made here: a new event, kept and folded */
   private emit(space: string, item: string, op: Op, field: string | undefined, value: unknown, actor = this.actor): PxEvent {
-    const e: PxEvent = { id: this.newId(), space, item, op, actor, replica: this.replica, hlc: this.clock.tick() };
+    const e: PxEvent = { v: FORMAT, id: this.newId(), space, item, op, actor, replica: this.replica, hlc: this.clock.tick() };
     if (field !== undefined) e.field = field;
     if (value !== undefined) e.value = value;
-    const bad = checkEvent(e);
+    const bad = checkEvent(e, FORMAT);
     if (bad) throw new Error(bad);
     this.keep(e);
     return e;
   }
 
-  /** an event into the log, and folded into the tables; false when the log holds it already */
+  /** an event into the log, and folded into the tables unless it is of a newer FORMAT than this build reads; false when
+   *  the log holds it already */
   private keep(e: PxEvent): boolean {
-    const r = this.run("INSERT OR IGNORE INTO px_events (id, space, item, op, field, value, actor, replica, hlc) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", e.id, e.space, e.item, e.op, e.field ?? null,
-      e.value === undefined ? null : JSON.stringify(e.value), e.actor, e.replica, e.hlc);
+    const r = this.run("INSERT OR IGNORE INTO px_events (id, space, item, op, field, value, actor, replica, hlc, v) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", e.id, e.space, e.item, e.op, e.field ?? null,
+      e.value === undefined ? null : JSON.stringify(e.value), e.actor, e.replica, e.hlc, formatOf(e));
     if (Number(r.changes) === 0) return false;
-    this.fold(e);
+    if (formatOf(e) <= FORMAT) this.fold(e);
     return true;
   }
 
@@ -276,13 +289,17 @@ export class Praxis {
     for (const it of this.all("SELECT item FROM px_made WHERE space = ? AND kind != 'space'", id)) this.project(it.item);
   }
 
-  /** throw the tables away and fold them again from the log */
+  /** throw the tables away and fold them again from the log -- every event this build reads (FORMAT) */
   rebuild() {
     this.transaction(() => {
       for (const t of FOLDED) this.db.exec(`DELETE FROM ${t}`);
-      for (const r of this.all("SELECT * FROM px_events ORDER BY hlc")) this.fold(eventOf(r));
+      for (const r of this.all("SELECT * FROM px_events WHERE v <= ? ORDER BY hlc", FORMAT)) this.fold(eventOf(r));
     });
   }
+
+  /** C-435: how many events the log keeps that are of a newer FORMAT than this build folds -- changes made on a newer
+   *  build, waiting for this one to be updated */
+  waiting(): number { return Number(this.one("SELECT COUNT(*) AS n FROM px_events WHERE v > ?", FORMAT)?.n ?? 0); }
 
   /** every table, row by row, sorted -- two replicas that have seen the same events give the same */
   tables(): Record<string, string[]> {
@@ -809,14 +826,17 @@ export class Praxis {
   }
 
   /** events from another replica: each checked, kept and folded, oldest first, in one transaction. A malformed one is
-   *  refused and counted; one already held is counted as known. */
+   *  refused and counted; one already held is counted as known. One of a newer FORMAT than this build reads (C-435) is
+   *  checked as far as its envelope, kept unfolded and counted as newer: the log holds it, so `have` stays a true
+   *  account and `missing` sends it on as it came. */
   receive(events: PxEvent[]): Received {
-    const out: Received = { applied: 0, known: 0, rejected: 0 };
+    const out: Received = { applied: 0, known: 0, rejected: 0, newer: 0 };
     this.transaction(() => {
       for (const e of [...events].sort(byHlc)) {
-        if (checkEvent(e)) { out.rejected++; continue; }
+        const newer = !checkEnvelope(e) && formatOf(e) > FORMAT;
+        if (!newer && checkEvent(e, FORMAT)) { out.rejected++; continue; }
         this.clock.observe(e.hlc);
-        if (this.keep(e)) out.applied++; else out.known++;
+        if (!this.keep(e)) out.known++; else if (newer) out.newer++; else out.applied++;
       }
       if (out.applied) this.number();
     });

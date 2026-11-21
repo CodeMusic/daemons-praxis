@@ -1,7 +1,8 @@
 // C-429: PRAXIS runs on the phone too (C-111) -- no node:*, no fs, and nothing imported from the companion.
 // The event (PROJECTS.md 4.4): every change is one, append-only, and the tables are a fold of them. History is the log,
 // undo is a compensating event, and sync is sending events. This file says what a well-formed event is; an event from
-// another replica that is not one is refused before it is kept.
+// another replica that is not one is refused before it is kept -- unless it is of a newer format than this build reads,
+// when only its envelope can be checked, and it is kept unfolded (FORMAT, C-435).
 
 import { parseHlc } from "./hlc.js";
 import { UUID } from "./ids.js";
@@ -13,7 +14,19 @@ export type Op = typeof OPS[number];
 /** what an AI (or anyone) may propose: a change that counts only once it is accepted */
 export const PROPOSABLE: readonly Op[] = ["make", "set", "move", "link", "unlink", "state", "note", "effort", "award", "archive"];
 
+/** C-435: the event format this build writes, and the newest it folds. Every event carries its format as `v`, so
+ *  replicas on different builds (a phone on an older release, a hub at the newest) can tell they differ; an event
+ *  without one is format 1, the events written before the field. A build folds every format up to its own. One of a
+ *  newer format is kept and sent on as it came, never folded, until a build that reads it opens the database
+ *  (engine.ts). What a format may change is what an event says -- its op, field and value; the ENVELOPE is the same in
+ *  every format (v, id, space, item, op, field, actor, replica, hlc), so an older build can still keep, order and pass
+ *  on an event it cannot read. A newer format puts anything new inside the value. */
+export const FORMAT = 1;
+/** an event's format: 1 when it carries none */
+export const formatOf = (e: { v?: unknown }): number => (e.v === undefined ? 1 : (e.v as number));
+
 export interface PxEvent {
+  v?: number;          // its format (FORMAT above); absent is 1
   id: string;          // a UUIDv7
   space: string;       // the SPACE it belongs to -- the unit of sharing and of sync
   item: string;        // the ITEM it changes (the space itself, for a change to the space)
@@ -74,14 +87,26 @@ export function checkChange(op: Op, field: unknown, value: unknown): string | nu
   }
 }
 
-/** what is wrong with an event, or null when nothing is */
-export function checkEvent(e: unknown): string | null {
+/** what is wrong with an event's envelope (FORMAT), the part every format shares, or null when nothing is */
+export function checkEnvelope(e: unknown): string | null {
   if (!obj(e)) return "not an object";
+  if (e.v !== undefined && !(Number.isSafeInteger(e.v) && (e.v as number) >= 1)) return "v is not a format";
   for (const k of ["id", "space", "item"] as const) if (!str(e[k]) || !UUID.test(e[k] as string)) return `${k} is not an id`;
-  if (!OPS.includes(e.op as Op)) return "no such op";
+  if (!str(e.op) || !NAME.test(e.op as string)) return "op is not a name";
   for (const k of ["actor", "replica"] as const) if (!str(e[k]) || !NAME.test(e[k] as string)) return `${k} is not a name`;
   const h = str(e.hlc) ? parseHlc(e.hlc as string) : null;
   if (!h || h.replica !== e.replica) return "hlc is not this replica's time";
   if (e.field !== undefined && (!str(e.field) || !NAME.test(e.field as string))) return "field is not a name";
-  return checkChange(e.op as Op, e.field, e.value);
+  return null;
+}
+
+/** what is wrong with an event, for a build that reads formats up to `format`, or null when nothing is. An event of a
+ *  newer format than that is never well-formed here: only its envelope can be read (checkEnvelope). */
+export function checkEvent(e: unknown, format = FORMAT): string | null {
+  const bad = checkEnvelope(e);
+  if (bad) return bad;
+  const ev = e as Record<string, unknown>;
+  if (formatOf(ev) > format) return `format ${ev.v} is newer than this build reads (${format})`;
+  if (!OPS.includes(ev.op as Op)) return "no such op";
+  return checkChange(ev.op as Op, ev.field, ev.value);
 }

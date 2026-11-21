@@ -4,12 +4,13 @@
 // px_. The SQL is plain SQLite, the same on Node's and Expo's.
 
 export const SCHEMA = `
-  -- this copy: its replica id (never sent anywhere)
+  -- this copy: its replica id, and the event format of the build that last opened it (never sent anywhere)
   CREATE TABLE IF NOT EXISTS px_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
-  -- THE LOG: every change, append-only
+  -- THE LOG: every change, append-only. v is the event's format (events.ts FORMAT, C-435), and comes last, so a log from
+  -- before it, given the column by ALTER TABLE, has its columns in the same order as a new one
   CREATE TABLE IF NOT EXISTS px_events (id TEXT PRIMARY KEY, space TEXT NOT NULL, item TEXT NOT NULL, op TEXT NOT NULL,
-    field TEXT, value TEXT, actor TEXT NOT NULL, replica TEXT NOT NULL, hlc TEXT NOT NULL);
+    field TEXT, value TEXT, actor TEXT NOT NULL, replica TEXT NOT NULL, hlc TEXT NOT NULL, v INTEGER NOT NULL DEFAULT 1);
   CREATE INDEX IF NOT EXISTS px_events_seen ON px_events (space, replica, hlc);
   CREATE INDEX IF NOT EXISTS px_events_item ON px_events (item, hlc);
 

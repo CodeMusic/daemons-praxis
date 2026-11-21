@@ -1,0 +1,18 @@
+# The engine's tests and typecheck at every push and pull request (C-435): every suite on node:sqlite and through
+# expo-sqlite's calls. node:sqlite needs Node 22.13 or later.
+name: test
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test

@@ -20,8 +20,11 @@ async function send(from: Peer, to: Peer, spaces: string[] | undefined, batch: n
     const events = await from.missing(await to.have(spaces), { spaces, limit: batch });
     if (!events.length) return sent;
     const r = await to.receive(events);
-    if (!r.applied) return sent;          // nothing it would take: stop rather than offer it again
-    sent += r.applied;
+    // C-435: events of a newer format are taken too (kept, unfolded), so they move `have` on as well. A peer from
+    // before the field says nothing of them.
+    const took = r.applied + (r.newer ?? 0);
+    if (!took) return sent;               // nothing it would take: stop rather than offer it again
+    sent += took;
   }
 }
 

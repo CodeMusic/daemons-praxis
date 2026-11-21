@@ -1,16 +1,18 @@
 # PRAXIS -- the engine
 
-PRAXIS is the project system under the companion's life management: goals, journals, tending, and any project a person
-runs. Its points are **ARETE**. The design is [`docs/PROJECTS.md`](../../docs/PROJECTS.md); this package is its
-section 4, the engine (C-429).
+PRAXIS is the project system under the [DAEMONS companion](https://github.com/CodeMusic/daemons-companion)'s life
+management: goals, journals, tending, and any project a person runs. Its points are **ARETE**. The design is the
+companion's [`docs/PROJECTS.md`](https://github.com/CodeMusic/daemons-companion/blob/main/docs/PROJECTS.md); this
+repository is its section 4, the engine (C-429). It was a package inside the companion until two apps needed it, and it
+came out with its history (C-435): the companion and the site EUDAIMONIA each pin it by tag.
 
 It imports **nothing from the companion and no package at all**: it runs on the phone's expo-sqlite and Node's
-`node:sqlite` through the same small `Db` interface the companion's Store uses (C-111), and it moves to a repository
-of its own with a `git mv`. `test/portable.test.ts` holds it to that.
+`node:sqlite` through the same small `Db` interface the companion's Store uses (C-111). `test/portable.test.ts` holds it
+to that.
 
 ## What it is
 
-- **One append-only log.** Every change is an event, `{ id, space, item, op, field?, value?, actor, replica, hlc }`,
+- **One append-only log.** Every change is an event, `{ v, id, space, item, op, field?, value?, actor, replica, hlc }`,
   with ops `make set move link unlink state note effort award spend propose accept decline archive`. The tables
   (`px_*`) are a fold of the log and can be rebuilt from it at any time (`rebuild()`).
 - **Ids** are UUIDv7s, made anywhere, offline. An id two replicas must make alike (an award, an accepted proposal's
@@ -43,23 +45,56 @@ other lacks, and `receive(events)` takes it. `sync(a, b)` runs the exchange both
 does not matter. A space whose reach is `phone` is never sent. Which replicas may exchange which spaces, and blobs,
 come in C-431.
 
+## The event format
+
+Replicas run different builds: a phone on last month's release syncs with a hub on today's. So **every event carries
+its format as `v`** (`FORMAT` in `src/events.ts`; it is 1). An event without one is format 1, which is what the engine
+wrote before the field, and a log from then is given the column, every event at 1, the first time it is opened.
+
+- **A build folds every format up to its own.** An event of a newer format is checked as far as its **envelope** (`v`,
+  `id`, `space`, `item`, `op`, `field`, `actor`, `replica`, `hlc`), **kept and sent on as it came, but not folded**.
+  `receive()` counts it as `newer`, and `waiting()` says how many the log holds. Because the log holds it, `have` stays
+  true, nothing is sent twice, and a replica on an older build still relays it to one that reads it.
+- **When a build that reads it opens the database, the tables are folded again**, and what waited is in them. Going back
+  to an older build folds again without it. The format of the build that last opened a database is in `px_meta`.
+- **The envelope never changes.** A new format may change what an event says -- a new op, a new field, a new value --
+  and puts anything new inside `value`. Raise `FORMAT` in the same commit as any change an older build would fold
+  wrongly, and say so in the tag's notes.
+
+`test/format.test.ts` runs an older and a newer build against one database.
+
 ## Use
 
+In an app's `package.json`, pinned by tag:
+
+```json
+"dependencies": { "@daemons/praxis": "git+https://github.com/CodeMusic/daemons-praxis.git#v0.1.0" }
+```
+
 ```ts
-import { Praxis } from "./packages/praxis/src/index.js";
+import { Praxis } from "@daemons/praxis";
 const px = new Praxis(db);                 // a node:sqlite DatabaseSync, or fromExpo(openDatabaseSync(...))
 const life = px.makeSpace({ title: "Life", prefix: "LIFE", form, reach: "home" });
 const step = px.make(life, "step", { title: "Water the seedlings" });
 px.state(step, "done");                    // pays the step's ARETE, once
 ```
 
+The package is TypeScript source (`src/`); nothing is compiled. Its files import each other as `./x.js`, as Node's
+ESM does, so a bundler is told to resolve that to `x.ts`. **tsx and vitest** do it already. **Metro** needs a line in
+`metro.config.js`'s `resolveRequest` (the companion's `app/metro.config.js` has it).
+
 The companion's GOALS are the first use (`server/src/goals.ts`, C-430): a LIFE space, its form's rules paying ARETE
 under daily caps, behind the routes the app and the boards already call.
 
 ## Test
 
-Node 22 or later: `npm install`, then `npm test` and `npm run typecheck`. Every suite runs twice, on `node:sqlite` and
-through `fromExpo()` over expo-sqlite's call shapes. The native expo-sqlite itself is only exercised on a phone.
-`test/converge.test.ts` has three replicas with skewed clocks make random changes and exchange them at random. They
-must end with the same tables and the same ARETE, and so must fresh replicas that receive every event one at a time
-in shuffled orders.
+Node 22.13 or later: `npm install`, then `npm test` and `npm run typecheck` (GitHub runs both at every push). Every
+suite runs twice, on `node:sqlite` and through `fromExpo()` over expo-sqlite's call shapes. The native expo-sqlite
+itself is only exercised on a phone. `test/converge.test.ts` has three replicas with skewed clocks make random changes
+and exchange them at random. They must end with the same tables and the same ARETE, and so must fresh replicas that
+receive every event one at a time in shuffled orders.
+
+## Releasing
+
+A release is a tag, `v<major>.<minor>.<patch>`, on `main`, with its tests passing. Each app moves its pin when it is
+ready. A new `FORMAT` is at least a minor release. The tickets are the companion's (`C-` ids).

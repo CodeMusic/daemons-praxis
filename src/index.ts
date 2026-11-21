@@ -5,7 +5,7 @@ export { Praxis, ledgerId, REACHES } from "./engine.js";
 export type { By, Effort, Entry, Have, Item, Link, Node, Note, Options, Proposal, Reach, Received, Space, Version, Write } from "./engine.js";
 export { sync, type Peer } from "./exchange.js";
 export { fromExpo, type Db, type ExpoDatabase, type Statement } from "./db.js";
-export { OPS, PROPOSABLE, checkEvent, isLong, type Long, type Op, type PxEvent } from "./events.js";
+export { FORMAT, OPS, PROPOSABLE, checkEnvelope, checkEvent, formatOf, isLong, type Long, type Op, type PxEvent } from "./events.js";
 export { CORE, FIELD_TYPES, LINK_TYPES, PHASES, PREFIX, SHORT, checkForm, type FieldDef, type FieldType, type Form, type KindDef,
   type Phase, type StateDef } from "./form.js";
 export { Clock, hlcIso, hlcString, parseHlc, type Hlc } from "./hlc.js";

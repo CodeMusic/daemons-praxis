@@ -180,10 +180,10 @@ describe.each(ENGINES)("merging on %s", (_, make) => {
     for (let i = 0; i < 20; i++) phone.make(life, "step", { title: `step ${i}` });
     const some = phone.missing(hub.have());
     const bad = { ...some[0], hlc: "yesterday" } as PxEvent;
-    expect(hub.receive([bad, { ...some[1], op: "explode" } as unknown as PxEvent])).toEqual({ applied: 0, known: 0, rejected: 2 });
+    expect(hub.receive([bad, { ...some[1], op: "explode" } as unknown as PxEvent])).toEqual({ applied: 0, known: 0, rejected: 2, newer: 0 });
     const r = await sync(phone, hub, { batch: 3 });
     expect(r.toB).toBe(some.length);
-    expect(hub.receive(some)).toEqual({ applied: 0, known: some.length, rejected: 0 });
+    expect(hub.receive(some)).toEqual({ applied: 0, known: some.length, rejected: 0, newer: 0 });
     expect(hub.have()).toEqual(phone.have());
     same(phone, hub);
   });

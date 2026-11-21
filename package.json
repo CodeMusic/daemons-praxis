@@ -2,12 +2,19 @@
   "name": "@daemons/praxis",
   "version": "0.1.0",
   "private": true,
-  "description": "PRAXIS's engine: an append-only event log folded into tables, merged across replicas (C-429).",
+  "description": "PRAXIS's engine: an append-only event log folded into tables, merged across replicas (C-429), for the DAEMONS companion.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CodeMusic/daemons-praxis.git"
+  },
   "type": "module",
   "main": "src/index.ts",
   "exports": {
     ".": "./src/index.ts"
   },
+  "files": [
+    "src"
+  ],
   "engines": {
     "node": ">=22.13"
   },
