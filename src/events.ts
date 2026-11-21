@@ -14,16 +14,29 @@ export type Op = typeof OPS[number];
 /** what an AI (or anyone) may propose: a change that counts only once it is accepted */
 export const PROPOSABLE: readonly Op[] = ["make", "set", "move", "link", "unlink", "state", "note", "effort", "award", "archive"];
 
-/** C-435: the event format this build writes, and the newest it folds. Every event carries its format as `v`, so
- *  replicas on different builds (a phone on an older release, a hub at the newest) can tell they differ; an event
- *  without one is format 1, the events written before the field. A build folds every format up to its own. One of a
- *  newer format is kept and sent on as it came, never folded, until a build that reads it opens the database
- *  (engine.ts). What a format may change is what an event says -- its op, field and value; the ENVELOPE is the same in
- *  every format (v, id, space, item, op, field, actor, replica, hlc), so an older build can still keep, order and pass
- *  on an event it cannot read. A newer format puts anything new inside the value. */
-export const FORMAT = 1;
+/** C-435: the newest event format this build folds. Every event carries its format as `v`, so replicas on different
+ *  builds (a phone on an older release, a hub at the newest) can tell they differ; an event without one is format 1,
+ *  the events written before the field. A build folds every format up to its own. One of a newer format is kept and
+ *  sent on as it came, never folded, until a build that reads it opens the database (engine.ts). What a format may
+ *  change is what an event says -- its op, field and value; the ENVELOPE is the same in every format (v, id, space,
+ *  item, op, field, actor, replica, hlc), so an older build can still keep, order and pass on an event it cannot read.
+ *  A newer format puts anything new inside the value.
+ *
+ *  C-431: format 2 joins one space to another (formatFor). An event is written in the OLDEST format that reads it as it
+ *  is meant, not always the newest, so a build that reads only format 1 still folds every change but a join. */
+export const FORMAT = 2;
 /** an event's format: 1 when it carries none */
 export const formatOf = (e: { v?: unknown }): number => (e.v === undefined ? 1 : (e.v as number));
+
+/** C-431: the fields format 2 added -- a space's `joined` (the space it is read in), and the number its new home gives an
+ *  item of a joined space (`handle.<home>`) */
+const joins = (field: unknown) => field === "joined" || (typeof field === "string" && field.startsWith("handle."));
+/** the oldest format that folds a change as it is meant: the format an event of it is written in */
+export function formatFor(op: Op, field?: unknown, value?: unknown): number {
+  if (op === "set" && joins(field)) return 2;
+  if (op === "propose" && obj(value) && value.op === "set" && joins(value.field)) return 2;
+  return 1;
+}
 
 export interface PxEvent {
   v?: number;          // its format (FORMAT above); absent is 1
@@ -108,5 +121,8 @@ export function checkEvent(e: unknown, format = FORMAT): string | null {
   const ev = e as Record<string, unknown>;
   if (formatOf(ev) > format) return `format ${ev.v} is newer than this build reads (${format})`;
   if (!OPS.includes(ev.op as Op)) return "no such op";
+  // a change written in a format too old for it would be folded wrongly by a build of that format
+  const needs = formatFor(ev.op as Op, ev.field, ev.value);
+  if (formatOf(ev) < needs) return `a change of format ${needs} cannot be format ${formatOf(ev)}`;
   return checkChange(ev.op as Op, ev.field, ev.value);
 }

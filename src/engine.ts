@@ -9,23 +9,29 @@
 //                  finish, so two phones that finish one step offline make the same award, and it is paid once
 //   a handle       numbered by the space's keeper; once given, kept (the first write wins, not the last)
 //   a proposal     counts only once accepted; an accept anywhere takes it
+//   a join         C-431: a space JOINED to another is read in it -- its items, numbered there by that space's keeper,
+//                  its ARETE and its proposals -- and keeps every event and number of its own. Two joins that make a
+//                  loop are read with the loop's earliest-made space as their home, the same on every replica
 //
 // Sync is the exchange at the end of this file: "here is what I have seen; send me the rest" (exchange.ts runs it).
 
 import type { Db, Statement } from "./db.js";
-import { checkChange, checkEnvelope, checkEvent, FORMAT, formatOf, isLong, NAME, PROPOSABLE, type Op, type PxEvent } from "./events.js";
+import { checkChange, checkEnvelope, checkEvent, FORMAT, formatFor, formatOf, isLong, NAME, PROPOSABLE, type Op, type PxEvent } from "./events.js";
 import { checkForm, checkValue, CORE, LINK_TYPES, PREFIX, SHORT, type Form, type Phase } from "./form.js";
 import { Clock, hlcIso, parseHlc } from "./hlc.js";
-import { cryptoRandom, derivedId, uuidv7, type Random } from "./ids.js";
+import { cryptoRandom, derivedId, HASH, uuidv7, type Random } from "./ids.js";
 import { between } from "./position.js";
-import { FOLDED, SCHEMA } from "./schema.js";
+import { FOLDED, INDEXES, SCHEMA } from "./schema.js";
 
 export interface Options {
   replica?: string;     // this copy's id: made once and kept in the database when not given
   actor?: string;       // who writes, unless a call says otherwise (a person, the daemon, a device, an agent)
   now?: () => number;   // the wall clock, in ms
   random?: Random;      // random bytes, for ids
+  ahead?: number;       // C-431: how far ahead of this clock (ms) another replica's time may be; events past it wait
 }
+/** C-431: a day -- a clock set wrong by hours still syncs; one set years ahead cannot drag every replica's time with it */
+export const AHEAD = 24 * 3600_000;
 export interface By { actor?: string }
 
 /** who a space reaches (PROJECTS.md 5): THIS PHONE never leaves it */
@@ -35,12 +41,17 @@ export const REACHES: readonly Reach[] = ["phone", "home", "shared", "public"];
 export interface Space {
   id: string; title: string; prefix: string; parent: string | null; keeper: string | null; reach: Reach;
   form: Form | null; archived: boolean; made: string; maker: string;
+  joined: string | null;   // C-431: the space it was joined to
+  home: string;            // and the space it is read in: the end of its joins, or itself
 }
 export interface Item {
-  id: string; space: string; kind: string; title: string; short: string; state: string | null; phase: Phase | null;
+  id: string;
+  space: string;           // the space it was made in, where its events go
+  home: string;            // C-431: the space it is read in -- its own, or the one its space was joined to
+  kind: string; title: string; short: string; state: string | null; phase: Phase | null;
   parent: string | null; position: string; points: number; virtue: string | null; due: string | null; archived: boolean;
-  number: number | null;   // the keeper's number, once given
-  handle: string;          // LIFE-12, or LIFE-~a3f2 until the keeper numbers it
+  number: number | null;   // the number its home's keeper gave it, once given
+  handle: string;          // LIFE-12, or LIFE-~a3f2 until the keeper numbers it (in its home's prefixes)
   made: string; maker: string;
   fields: Record<string, unknown>;   // the kind's own
 }
@@ -62,8 +73,9 @@ export interface Proposal {
 /** what a replica has seen: for each space, the latest time it holds from each replica */
 export type Have = Record<string, Record<string, string>>;
 /** what receive() did with what it was sent: folded, held already, refused, and kept but of a newer FORMAT than this
- *  build folds (C-435) -- sent on as it came, and folded once a build that reads it opens the database */
-export interface Received { applied: number; known: number; rejected: number; newer: number }
+ *  build folds (C-435) -- sent on as it came, and folded once a build that reads it opens the database -- and (C-431)
+ *  left for later because its time is further ahead of this clock than AHEAD: sent again until this clock catches up */
+export interface Received { applied: number; known: number; rejected: number; newer: number; ahead: number }
 
 type Made = { space: string; kind: string; hlc: string; actor: string };
 type Row = Record<string, any>;
@@ -71,6 +83,12 @@ type Row = Record<string, any>;
 /** the id of the ledger entry an award or spend makes: the same item, op and key make the same entry everywhere */
 export const ledgerId = (item: string, op: "award" | "spend", key: string) => derivedId("ledger", item, op, key);
 const byHlc = (a: { hlc: string } | Row, b: { hlc: string } | Row) => (a.hlc < b.hlc ? -1 : a.hlc > b.hlc ? 1 : 0);
+/** C-431: the field an item's number is kept in -- `handle` in the space it was made in, `handle.<home>` in a home its
+ *  space was joined to. Each is given once and kept, so every number an item ever had can still be read. */
+const handleIn = (space: string, home: string) => (home === space ? "handle" : `handle.${home}`);
+const isHandle = (field: string) => field === "handle" || field.startsWith("handle.");
+/** a row's home, in SQL: its space's, or its space itself while that space's making has not arrived */
+const HOME = (col: string) => `COALESCE((SELECT home FROM px_spaces WHERE id = ${col}), ${col})`;
 const cut = (s: string, n: number) => Array.from(s).slice(0, n).join("");
 const str = (v: unknown) => (typeof v === "string" ? v : null);
 const eventOf = (r: Row): PxEvent => {
@@ -84,6 +102,8 @@ export class Praxis {
   readonly replica: string;
   actor: string;
   private readonly clock: Clock;
+  private readonly now: () => number;
+  private readonly ahead: number;
   private readonly newId: () => string;
   private readonly statements = new Map<string, Statement>();
   private depth = 0;
@@ -96,7 +116,14 @@ export class Praxis {
     // C-435: a log from before events carried their format -- every event in it is format 1
     if (!(db.prepare("PRAGMA table_info(px_events)").all() as Row[]).some((c) => c.name === "v"))
       db.exec("ALTER TABLE px_events ADD COLUMN v INTEGER NOT NULL DEFAULT 1");
+    // C-431: tables from before joins -- the columns added, and the fold made again to fill them
+    const homeless = !(db.prepare("PRAGMA table_info(px_items)").all() as Row[]).some((c) => c.name === "home");
+    if (homeless) db.exec("ALTER TABLE px_spaces ADD COLUMN joined TEXT; ALTER TABLE px_spaces ADD COLUMN home TEXT NOT NULL DEFAULT ''; " +
+      "ALTER TABLE px_items ADD COLUMN home TEXT NOT NULL DEFAULT ''");
+    db.exec(INDEXES);
     const now = opts.now ?? Date.now;
+    this.now = now;
+    this.ahead = opts.ahead ?? AHEAD;
     this.newId = uuidv7(now, opts.random ?? cryptoRandom);
     const kept = this.one("SELECT value FROM px_meta WHERE key = 'replica'")?.value as string | undefined;
     if (opts.replica !== undefined && kept !== undefined && opts.replica !== kept)
@@ -115,7 +142,7 @@ export class Praxis {
     const was = Number(noted ?? 1);    // a database from before the format was noted was opened by a format 1 build
     const moved = was !== FORMAT && !!this.one("SELECT 1 FROM px_events WHERE v > ? LIMIT 1", Math.min(was, FORMAT));
     if (noted !== String(FORMAT)) this.run("INSERT OR REPLACE INTO px_meta (key, value) VALUES ('format', ?)", String(FORMAT));
-    if (before || moved) this.rebuild();
+    if (before || moved || homeless) this.rebuild();
   }
 
   // ---- the database --------------------------------------------------------------------------------------------------
@@ -143,7 +170,8 @@ export class Praxis {
 
   /** a change made here: a new event, kept and folded */
   private emit(space: string, item: string, op: Op, field: string | undefined, value: unknown, actor = this.actor): PxEvent {
-    const e: PxEvent = { v: FORMAT, id: this.newId(), space, item, op, actor, replica: this.replica, hlc: this.clock.tick() };
+    const e: PxEvent = { v: formatFor(op, field, value), id: this.newId(), space, item, op, actor, replica: this.replica,
+      hlc: this.clock.tick() };
     if (field !== undefined) e.field = field;
     if (value !== undefined) e.value = value;
     const bad = checkEvent(e, FORMAT);
@@ -220,7 +248,7 @@ export class Praxis {
     this.run("INSERT OR IGNORE INTO px_writes (item, field, hlc, event, actor, value, is_long, base) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       e.item, field, e.hlc, e.id, e.actor, json, long ? 1 : 0, long ? value.base : null);
     const now = this.one("SELECT hlc FROM px_values WHERE item = ? AND field = ?", e.item, field)?.hlc as string | undefined;
-    if (now === undefined || (field === "handle" ? e.hlc < now : e.hlc > now))
+    if (now === undefined || (isHandle(field) ? e.hlc < now : e.hlc > now))
       this.run("INSERT OR REPLACE INTO px_values (item, field, value, hlc, event) VALUES (?, ?, ?, ?, ?)", e.item, field, json, e.hlc, e.id);
   }
 
@@ -258,23 +286,28 @@ export class Praxis {
     const phase = state === null ? null
       : (this.one("SELECT phase FROM px_states WHERE space = ? AND kind = ? AND state = ?", made.space, made.kind, state)?.phase ?? null);
     const title = str(r.title) ?? "";
+    const home = (this.one("SELECT home FROM px_spaces WHERE id = ?", made.space)?.home as string | undefined) || made.space;
+    const handle = r[handleIn(made.space, home)];
     this.run("INSERT OR REPLACE INTO px_items (id, space, kind, title, short, state, phase, parent, position, points, virtue, " +
-      "due, archived, handle, made, maker) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "due, archived, handle, made, maker, home) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       id, made.space, made.kind, title, cut(str(r.short) || title, SHORT), state, phase, str(r.parent), str(r.position) ?? "",
       typeof r.points === "number" ? r.points : (kind?.points ?? 0), str(r.virtue) ?? kind?.virtue ?? null, str(r.due),
-      r.archived === true ? 1 : 0, Number.isInteger(r.handle) ? r.handle : null, hlcIso(made.hlc), made.actor);
+      r.archived === true ? 1 : 0, Number.isInteger(handle) ? handle : null, hlcIso(made.hlc), made.actor, home);
   }
 
   private projectSpace(id: string, made: Made) {
     const r = this.values(id);
     const formAt = this.one("SELECT hlc FROM px_values WHERE item = ? AND field = 'form'", id)?.hlc as string | undefined;
-    const before = this.one("SELECT form_hlc FROM px_spaces WHERE id = ?", id);
+    const before = this.one("SELECT form_hlc, joined, home FROM px_spaces WHERE id = ?", id);
     const form = r.form && !checkForm(r.form).length ? (r.form as Form) : null;
     const reach = REACHES.includes(r.reach as Reach) ? r.reach : "phone";
+    const joined = str(r.joined);
     this.run("INSERT OR REPLACE INTO px_spaces (id, parent, title, prefix, keeper, reach, form_name, form_version, form_hlc, " +
-      "archived, made, maker) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "archived, made, maker, joined, home) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       id, str(r.parent), str(r.title) ?? "", str(r.prefix) ?? "PX", str(r.keeper), reach, form?.name ?? null,
-      form?.version ?? null, formAt ?? null, r.archived === true ? 1 : 0, hlcIso(made.hlc), made.actor);
+      form?.version ?? null, formAt ?? null, r.archived === true ? 1 : 0, hlcIso(made.hlc), made.actor, joined, before?.home || id);
+    // a join (or its undoing), or a space whose making arrived after a join to it: every home read again
+    if (!before || (before.joined ?? null) !== joined) this.rehome();
     if ((before?.form_hlc ?? null) === (formAt ?? null)) return;
     // a form taken (or arrived): its kinds, states and fields, and every item of the space projected against them again
     for (const t of ["px_kinds", "px_states", "px_fields"]) this.run(`DELETE FROM ${t} WHERE space = ?`, id);
@@ -287,6 +320,36 @@ export class Praxis {
         this.run("INSERT INTO px_fields (space, kind, field, type, def) VALUES (?, ?, ?, ?, ?)", id, k, f, fd.type, JSON.stringify(fd));
     }
     for (const it of this.all("SELECT item FROM px_made WHERE space = ? AND kind != 'space'", id)) this.project(it.item);
+  }
+
+  /** C-431: every space's HOME -- the end of its joins. A join to a space this replica has not heard of yet is read as no
+   *  join until it arrives; two joins that make a loop are read with the loop's earliest-made space as no join, so every
+   *  replica reads the same homes whichever order the joins came in. A space whose home moved has its items read again. */
+  private rehome() {
+    const rows = this.all("SELECT s.id, s.joined, s.home, m.hlc FROM px_spaces s JOIN px_made m ON m.item = s.id");
+    const made = new Map(rows.map((r) => [r.id as string, r.hlc as string]));
+    const to = new Map(rows.map((r) => [r.id as string, r.joined !== null && r.joined !== r.id && made.has(r.joined) ? r.joined as string : null]));
+    for (const start of to.keys()) {                         // each loop, broken at its earliest-made space
+      const on = new Set<string>();
+      let at: string | null = start;
+      while (at !== null && !on.has(at)) { on.add(at); at = to.get(at) ?? null; }
+      if (at === null) continue;
+      const loop: string[] = [];
+      for (let x = at; !loop.includes(x); x = to.get(x)!) loop.push(x);
+      to.set(loop.reduce((a, b) => (made.get(a)! < made.get(b)! || (made.get(a) === made.get(b) && a < b) ? a : b)), null);
+    }
+    const homeOf = (id: string): string => { let at = id; for (let next = to.get(at); next; next = to.get(at)) at = next; return at; };
+    for (const r of rows) {
+      const home = homeOf(r.id);
+      if (home === r.home) continue;
+      this.run("UPDATE px_spaces SET home = ? WHERE id = ?", home, r.id);
+      for (const it of this.all("SELECT item FROM px_made WHERE space = ? AND kind != 'space'", r.id)) this.project(it.item);
+    }
+  }
+
+  /** the space a space is read in: its home, or itself while its making has not arrived */
+  private homeOf(space: string): string {
+    return (this.one("SELECT home FROM px_spaces WHERE id = ?", space)?.home as string | undefined) || space;
   }
 
   /** throw the tables away and fold them again from the log -- every event this build reads (FORMAT) */
@@ -315,7 +378,8 @@ export class Praxis {
     if (!s) return null;
     const f = this.one("SELECT value FROM px_values WHERE item = ? AND field = 'form'", id);
     return { id, title: s.title, prefix: s.prefix, parent: s.parent, keeper: s.keeper, reach: s.reach,
-      form: s.form_name === null ? null : JSON.parse(f!.value), archived: !!s.archived, made: s.made, maker: s.maker };
+      form: s.form_name === null ? null : JSON.parse(f!.value), archived: !!s.archived, made: s.made, maker: s.maker,
+      joined: s.joined, home: s.home || id };
   }
 
   spaces(): Space[] { return this.all("SELECT id FROM px_spaces ORDER BY made, id").map((r) => this.space(r.id)!); }
@@ -335,19 +399,19 @@ export class Praxis {
 
   private itemOf(r: Row, prefixes?: Map<string, string>, held?: Record<string, unknown>): Item {
     const p = prefixes ? null : this.one("SELECT s.prefix AS own, k.prefix AS kind FROM px_spaces s " +
-      "LEFT JOIN px_kinds k ON k.space = s.id AND k.kind = ? WHERE s.id = ?", r.kind, r.space);
+      "LEFT JOIN px_kinds k ON k.space = s.id AND k.kind = ? WHERE s.id = ?", r.kind, r.home || r.space);
     const prefix = prefixes ? (prefixes.get(r.kind) ?? prefixes.get("")!) : (p?.kind ?? p?.own ?? "PX");
     const fields: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(held ?? this.values(r.id))) if (!(CORE as readonly string[]).includes(k)) fields[k] = v;
-    return { id: r.id, space: r.space, kind: r.kind, title: r.title, short: r.short, state: r.state, phase: r.phase,
+    for (const [k, v] of Object.entries(held ?? this.values(r.id))) if (!(CORE as readonly string[]).includes(k) && !isHandle(k)) fields[k] = v;
+    return { id: r.id, space: r.space, home: r.home || r.space, kind: r.kind, title: r.title, short: r.short, state: r.state, phase: r.phase,
       parent: r.parent, position: r.position, points: r.points, virtue: r.virtue, due: r.due, archived: !!r.archived,
       number: r.handle, handle: r.handle === null ? `${prefix}-~${r.id.slice(-4)}` : `${prefix}-${r.handle}`,
       made: r.made, maker: r.maker, fields };
   }
 
-  /** a space's items in their order; `parent: null` for the top level */
+  /** a space's items in their order -- those of every space joined to it too (C-431); `parent: null` for the top level */
   items(space: string, f: { kind?: string; phase?: Phase; parent?: string | null; archived?: boolean } = {}): Item[] {
-    const where = ["i.space = ?"], args: unknown[] = [space];
+    const where = ["i.home = ?"], args: unknown[] = [space];
     if (f.kind !== undefined) { where.push("i.kind = ?"); args.push(f.kind); }
     if (f.phase !== undefined) { where.push("i.phase = ?"); args.push(f.phase); }
     if (f.parent !== undefined) { where.push("i.parent IS ?"); args.push(f.parent); }
@@ -373,8 +437,8 @@ export class Praxis {
   /** the item a handle names (LIFE-12 -> 12). A kind with a prefix of its own is numbered on its own (STEP-17): name
    *  the kind to look there; without one, the space's own numbers are looked in. */
   numbered(space: string, n: number, kind?: string): Item | null {
-    const r = this.one("SELECT i.* FROM px_items i LEFT JOIN px_kinds k ON k.space = i.space AND k.kind = i.kind " +
-      "WHERE i.space = ? AND i.handle = ? AND COALESCE(k.prefix, '') = ?", space, n, kind === undefined ? "" : this.sequence(space, kind));
+    const r = this.one("SELECT i.* FROM px_items i LEFT JOIN px_kinds k ON k.space = i.home AND k.kind = i.kind " +
+      "WHERE i.home = ? AND i.handle = ? AND COALESCE(k.prefix, '') = ?", space, n, kind === undefined ? "" : this.sequence(space, kind));
     return r ? this.itemOf(r) : null;
   }
 
@@ -384,7 +448,7 @@ export class Praxis {
     const items = this.items(space);
     const ids = new Set(items.map((i) => i.id));
     const movedAt = new Map(this.all("SELECT v.item, v.hlc FROM px_values v JOIN px_items i ON i.id = v.item " +
-      "WHERE i.space = ? AND v.field = 'parent'", space).map((r) => [r.item as string, r.hlc as string]));
+      "WHERE i.home = ? AND v.field = 'parent'", space).map((r) => [r.item as string, r.hlc as string]));
     const parent = new Map(items.map((i) => [i.id, i.parent !== null && ids.has(i.parent) ? i.parent : null]));
     for (const start of parent.keys()) {
       const path: string[] = [], on = new Set<string>();
@@ -455,16 +519,17 @@ export class Praxis {
   ledger(space?: string, o: { since?: number } = {}): Entry[] {
     const from = o.since === undefined ? "" : String(Math.max(0, Math.floor(o.since))).padStart(18, "0");
     const sql = "SELECT l.*, t.id IS NOT NULL AS back, m.kind AS kind FROM px_ledger l LEFT JOIN px_takebacks t ON t.id = l.id " +
-      `LEFT JOIN px_made m ON m.item = l.item WHERE ${space === undefined ? "" : "l.space = ? AND "}l.hlc >= ? ORDER BY l.hlc, l.id`;
+      `LEFT JOIN px_made m ON m.item = l.item WHERE ${space === undefined ? "" : `${HOME("l.space")} = ? AND `}l.hlc >= ? ORDER BY l.hlc, l.id`;
     return (space === undefined ? this.all(sql, from) : this.all(sql, space, from))
       .map((r) => ({ id: r.id, space: r.space, item: r.item, op: r.op, key: r.key, points: r.points, reason: r.reason,
         actor: r.actor, hlc: r.hlc, back: !!r.back, kind: r.kind ?? null }));
   }
 
-  /** ARETE held: every award less every spend, leaving out what was taken back (one space's, or all of them) */
+  /** ARETE held: every award less every spend, leaving out what was taken back (one space's -- with every space joined to
+   *  it, C-431 -- or all of them) */
   arete(space?: string): number {
     const r = this.one("SELECT COALESCE(SUM(CASE op WHEN 'award' THEN points ELSE -points END), 0) AS n FROM px_ledger l " +
-      "WHERE NOT EXISTS (SELECT 1 FROM px_takebacks t WHERE t.id = l.id) AND (? IS NULL OR space = ?)", space ?? null, space ?? null);
+      `WHERE NOT EXISTS (SELECT 1 FROM px_takebacks t WHERE t.id = l.id) AND (? IS NULL OR ${HOME("l.space")} = ?)`, space ?? null, space ?? null);
     return Number(r?.n ?? 0);
   }
 
@@ -481,7 +546,7 @@ export class Praxis {
   }
 
   proposals(space: string, status?: Proposal["status"]): Proposal[] {
-    return this.all("SELECT id FROM px_proposals WHERE space = ? ORDER BY hlc, id", space).map((r) => this.proposal(r.id)!)
+    return this.all(`SELECT p.id FROM px_proposals p WHERE ${HOME("p.space")} = ? ORDER BY p.hlc, p.id`, space).map((r) => this.proposal(r.id)!)
       .filter((p) => status === undefined || p.status === status);
   }
 
@@ -503,6 +568,7 @@ export class Praxis {
   /** a value for a field, checked against the item's kind (a long body becomes { text, base }) */
   private checked(space: Space & { form: Form }, kind: string, field: string, value: unknown, base: string | null): unknown {
     const bad = (why: string) => new Error(`${field}: ${why}`);
+    if (isHandle(field) || field === "joined") throw bad("is the keeper's, or join()'s, not set");
     switch (field) {
       case "title": if (typeof value !== "string" || !value.trim() || value.length > 400) throw bad("a title, up to 400 characters"); return value;
       case "short": if (value !== null && (typeof value !== "string" || Array.from(value).length > SHORT)) throw bad(`at most ${SHORT} characters`); return value;
@@ -525,8 +591,8 @@ export class Praxis {
 
   /** a position for an item among its siblings: at the end, at the start (after: null) or after one of them */
   private slot(space: string, parent: string | null, after?: string | null, skip?: string): string {
-    const sibs = this.all("SELECT id, position FROM px_items WHERE space = ? AND parent IS ? AND id IS NOT ? AND position != '' " +
-      "ORDER BY position, id", space, parent, skip ?? null);
+    const sibs = this.all("SELECT id, position FROM px_items WHERE home = ? AND parent IS ? AND id IS NOT ? AND position != '' " +
+      "ORDER BY position, id", this.homeOf(space), parent, skip ?? null);
     if (after === undefined) return between(sibs.at(-1)?.position ?? null, null);
     if (after === null) return between(null, sibs[0]?.position ?? null);
     const i = sibs.findIndex((s) => s.id === after);
@@ -556,6 +622,19 @@ export class Praxis {
     this.transaction(() => { this.emit(space, space, "set", field, value, o.actor); this.number(); });
   }
 
+  /** C-431: a space JOINED to another, and read in it from now on -- its items there, numbered by that space's keeper
+   *  (each keeping every number it had), and its ARETE and proposals counted there; its events stay its own. `into:
+   *  null` reads it on its own again. A phone that hosted alone joins a hub this way and loses nothing. */
+  join(space: string, into: string | null, o: By = {}) {
+    if (!this.space(space)) throw new Error(`no space ${space}`);
+    if (into !== null) {
+      if (!this.space(into)) throw new Error(`no space ${into}`);
+      for (let at: string | null = into, seen = new Set<string>(); at !== null && !seen.has(at); seen.add(at), at = this.space(at)?.joined ?? null)
+        if (at === space) throw new Error("a space cannot be joined to itself, or to a space joined to it");
+    }
+    this.transaction(() => { this.emit(space, space, "set", "joined", into, o.actor); this.number(); });
+  }
+
   /** take a form -- a newer version of its own, or another -- for a space */
   adopt(space: string, form: Form, o: By = {}) {
     const problems = checkForm(form);
@@ -573,11 +652,12 @@ export class Praxis {
       const id = this.newId();
       this.emit(space, id, "make", undefined, this.making(space, kind, fields, o), o.actor);
       if (o.number !== undefined) {
-        if (this.one("SELECT keeper FROM px_spaces WHERE id = ?", space)?.keeper !== this.replica) throw new Error("only the space's keeper numbers its items");
+        const home = this.homeOf(space);
+        if (this.one("SELECT keeper FROM px_spaces WHERE id = ?", home)?.keeper !== this.replica) throw new Error("only the space's keeper numbers its items");
         if (!Number.isInteger(o.number) || o.number < 1) throw new Error("a handle's number is a whole number from 1");
-        const had = this.numbered(space, o.number, kind);
+        const had = this.numbered(home, o.number, kind);
         if (had) throw new Error(`${had.handle} is given already`);
-        this.emit(space, id, "set", "handle", o.number, "keeper");
+        this.emit(space, id, "set", handleIn(space, home), o.number, "keeper");
       }
       this.number();
       return id;
@@ -594,7 +674,7 @@ export class Praxis {
     for (const [f, x] of Object.entries(rest)) value[f] = this.checked(s, kind, f, x, null);
     if (typeof value.title !== "string") throw new Error("an item needs a title");
     const parent = o.parent ?? null;
-    if (parent !== null && this.must(parent).space !== space) throw new Error("a parent is in the same space");
+    if (parent !== null && this.must(parent).home !== this.homeOf(space)) throw new Error("a parent is in the same space");
     value.parent = parent;
     value.position = this.slot(space, parent, o.after);
     return value;
@@ -616,7 +696,7 @@ export class Praxis {
       // up from the new parent (a loop two replicas made already is walked once, not forever)
       for (let at = parent, seen = new Set<string>(); at !== null && !seen.has(at); seen.add(at), at = this.must(at).parent) {
         if (at === item) throw new Error("an item cannot go under itself");
-        if (this.must(at).space !== it.space) throw new Error("a parent is in the same space");
+        if (this.must(at).home !== it.home) throw new Error("a parent is in the same space");
       }
       this.emit(it.space, item, "move", undefined, { parent, position: this.slot(it.space, parent, o.after, item) }, o.actor);
     });
@@ -720,7 +800,7 @@ export class Praxis {
       if (points > this.arete()) throw new Error(`${points} ARETE is more than is held (${this.arete()})`);
       const key = o.key ?? this.newId();
       const item = o.item ?? space;
-      if (item !== space && this.must(item).space !== space) throw new Error("a spend's item is in its space");
+      if (item !== space && this.must(item).home !== this.homeOf(space)) throw new Error("a spend's item is in its space");
       this.emit(space, item, "spend", key, o.reason === undefined ? { points } : { points, reason: o.reason }, o.actor);
       return key;
     });
@@ -780,24 +860,39 @@ export class Praxis {
   }
 
   /** HANDLES: in every space this replica keeps, each item without a number given the next, in the order they were
-   *  made. Runs after every change made here and every exchange; returns how many it numbered. */
+   *  made -- the items of every space joined to it too, each number kept in the space the item was made in (C-431: a
+   *  joined space's own keeper numbers nothing more). Runs after every change made here and every exchange; returns how
+   *  many it numbered. */
   number(): number {
     let n = 0;
-    const seq = "FROM px_items i LEFT JOIN px_kinds k ON k.space = i.space AND k.kind = i.kind";
-    for (const s of this.all("SELECT id FROM px_spaces WHERE keeper = ?", this.replica)) {
-      if (!this.one("SELECT 1 FROM px_items WHERE space = ? AND handle IS NULL LIMIT 1", s.id)) continue;   // nothing to number
+    const seq = "FROM px_items i LEFT JOIN px_kinds k ON k.space = i.home AND k.kind = i.kind";
+    for (const s of this.all("SELECT id FROM px_spaces WHERE keeper = ? AND home = id", this.replica)) {
+      if (!this.one("SELECT 1 FROM px_items WHERE home = ? AND handle IS NULL LIMIT 1", s.id)) continue;   // nothing to number
       // each run of numbers -- the space's own (""), and each kind's prefix (C-430) -- goes on from its highest
-      const next = new Map(this.all(`SELECT COALESCE(k.prefix, '') AS seq, MAX(i.handle) AS n ${seq} WHERE i.space = ? GROUP BY seq`, s.id)
+      const next = new Map(this.all(`SELECT COALESCE(k.prefix, '') AS seq, MAX(i.handle) AS n ${seq} WHERE i.home = ? GROUP BY seq`, s.id)
         .map((r) => [r.seq as string, 1 + Number(r.n ?? 0)]));
-      for (const it of this.all(`SELECT i.id, COALESCE(k.prefix, '') AS seq ${seq} JOIN px_made m ON m.item = i.id ` +
-        "WHERE i.space = ? AND i.handle IS NULL ORDER BY m.hlc, i.id", s.id)) {
+      for (const it of this.all(`SELECT i.id, i.space, COALESCE(k.prefix, '') AS seq ${seq} JOIN px_made m ON m.item = i.id ` +
+        "WHERE i.home = ? AND i.handle IS NULL ORDER BY m.hlc, i.id", s.id)) {
         const h = next.get(it.seq) ?? 1;
-        this.emit(s.id, it.id, "set", "handle", h, "keeper");
+        this.emit(it.space, it.id, "set", handleIn(it.space, s.id), h, "keeper");
         next.set(it.seq, h + 1);
         n++;
       }
     }
     return n;
+  }
+
+  /** C-431: every BLOB the spaces' fields name -- in every write, the set-aside ones too: the SHA-256s whose bytes a
+   *  replica holding those spaces should hold (blobs.ts). All of them, or the named spaces'. */
+  blobs(spaces?: string[]): string[] {
+    const out = new Set<string>();
+    for (const r of this.all("SELECT DISTINCT w.value, m.space FROM px_writes w JOIN px_made m ON m.item = w.item " +
+      "JOIN px_fields f ON f.space = m.space AND f.kind = m.kind AND f.field = w.field WHERE f.type = 'blob'")) {
+      if (spaces && !spaces.includes(r.space)) continue;
+      const v = JSON.parse(r.value);
+      if (typeof v === "string" && HASH.test(v)) out.add(v);
+    }
+    return [...out].sort();
   }
 
   // ---- the exchange (PROJECTS.md 5): it knows nothing of how the events travel ---------------------------------------
@@ -810,15 +905,17 @@ export class Praxis {
     return out;
   }
 
-  /** the events another replica has not seen, oldest first -- never a space whose reach is THIS PHONE. A replica's
-   *  events are always sent from its oldest unseen on, so what a replica holds of each other is never missing a middle,
-   *  and its `have` stays a true account of it; `limit` keeps that true too. */
-  missing(have: Have, o: { spaces?: string[]; limit?: number } = {}): PxEvent[] {
+  /** the events another replica has not seen, oldest first -- never a space whose reach is THIS PHONE, and (C-431) only
+   *  spaces of the reaches it is sent (`reaches`: every one but THIS PHONE, unless it says). A replica's events are
+   *  always sent from its oldest unseen on, so what a replica holds of each other is never missing a middle, and its
+   *  `have` stays a true account of it; `limit` keeps that true too. */
+  missing(have: Have, o: { spaces?: string[]; limit?: number; reaches?: readonly Reach[] } = {}): PxEvent[] {
     const limit = o.limit ?? Number.MAX_SAFE_INTEGER;
     const out: PxEvent[] = [];
     for (const { space, replica } of this.all("SELECT DISTINCT space, replica FROM px_events")) {
       if (o.spaces && !o.spaces.includes(space)) continue;
-      if (this.one("SELECT reach FROM px_spaces WHERE id = ?", space)?.reach === "phone") continue;
+      const reach = this.one("SELECT reach FROM px_spaces WHERE id = ?", space)?.reach as Reach | undefined;
+      if (reach === "phone" || (reach !== undefined && o.reaches && !o.reaches.includes(reach))) continue;
       out.push(...this.all("SELECT * FROM px_events WHERE space = ? AND replica = ? AND hlc > ? ORDER BY hlc LIMIT ?",
         space, replica, have[space]?.[replica] ?? "", limit).map(eventOf));
     }
@@ -830,11 +927,15 @@ export class Praxis {
    *  checked as far as its envelope, kept unfolded and counted as newer: the log holds it, so `have` stays a true
    *  account and `missing` sends it on as it came. */
   receive(events: PxEvent[]): Received {
-    const out: Received = { applied: 0, known: 0, rejected: 0, newer: 0 };
+    const out: Received = { applied: 0, known: 0, rejected: 0, newer: 0, ahead: 0 };
+    const latest = this.now() + this.ahead;
     this.transaction(() => {
       for (const e of [...events].sort(byHlc)) {
         const newer = !checkEnvelope(e) && formatOf(e) > FORMAT;
         if (!newer && checkEvent(e, FORMAT)) { out.rejected++; continue; }
+        // C-431: a time further ahead than AHEAD waits, unkept, so one clock set wrong cannot drag every replica's
+        // forward. Every later event from that replica is later still, so it waits too, and `have` stays true.
+        if (parseHlc(e.hlc)!.ms > latest) { out.ahead++; continue; }
         this.clock.observe(e.hlc);
         if (!this.keep(e)) out.known++; else if (newer) out.newer++; else out.applied++;
       }

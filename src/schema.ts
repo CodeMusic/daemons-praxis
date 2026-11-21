@@ -26,9 +26,11 @@ export const SCHEMA = `
     event TEXT NOT NULL, PRIMARY KEY (item, field));
 
   -- SPACES, and the KINDS, STATES and FIELDS of the form each was made from
+  -- C-431: joined, the space it was joined to, and home, the space it is read in (the end of its joins; itself when none)
+  -- -- last, as ALTER TABLE adds them to a database from before, so its columns are in the same order as a new one's
   CREATE TABLE IF NOT EXISTS px_spaces (id TEXT PRIMARY KEY, parent TEXT, title TEXT NOT NULL, prefix TEXT NOT NULL,
     keeper TEXT, reach TEXT NOT NULL, form_name TEXT, form_version INTEGER, form_hlc TEXT, archived INTEGER NOT NULL,
-    made TEXT NOT NULL, maker TEXT NOT NULL);
+    made TEXT NOT NULL, maker TEXT NOT NULL, joined TEXT, home TEXT NOT NULL DEFAULT '');
   CREATE TABLE IF NOT EXISTS px_kinds (space TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, points INTEGER,
     virtue TEXT, prefix TEXT, PRIMARY KEY (space, kind));
   CREATE TABLE IF NOT EXISTS px_states (space TEXT NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL, phase TEXT NOT NULL,
@@ -36,13 +38,12 @@ export const SCHEMA = `
   CREATE TABLE IF NOT EXISTS px_fields (space TEXT NOT NULL, kind TEXT NOT NULL, field TEXT NOT NULL, type TEXT NOT NULL,
     def TEXT NOT NULL, PRIMARY KEY (space, kind, field));
 
-  -- ITEMS: the columns the engine indexes; a kind's own fields stay in px_values
+  -- ITEMS: the columns the engine indexes; a kind's own fields stay in px_values. space is the space it was made in (its
+  -- events go there); home (C-431) the space it is read in, and handle its number there
   CREATE TABLE IF NOT EXISTS px_items (id TEXT PRIMARY KEY, space TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL,
     short TEXT NOT NULL, state TEXT, phase TEXT, parent TEXT, position TEXT NOT NULL, points INTEGER NOT NULL, virtue TEXT,
-    due TEXT, archived INTEGER NOT NULL, handle INTEGER, made TEXT NOT NULL, maker TEXT NOT NULL);
+    due TEXT, archived INTEGER NOT NULL, handle INTEGER, made TEXT NOT NULL, maker TEXT NOT NULL, home TEXT NOT NULL DEFAULT '');
   CREATE INDEX IF NOT EXISTS px_items_space ON px_items (space, parent, position);
-  CREATE INDEX IF NOT EXISTS px_items_handle ON px_items (space, handle);
-  CREATE INDEX IF NOT EXISTS px_items_kind ON px_items (space, kind, phase);
 
   -- LINKS, added and taken away by event id: a link stands until an unlink names it
   CREATE TABLE IF NOT EXISTS px_links (id TEXT PRIMARY KEY, space TEXT NOT NULL, item TEXT NOT NULL, type TEXT NOT NULL,
@@ -73,6 +74,15 @@ export const SCHEMA = `
   CREATE TABLE IF NOT EXISTS px_decisions (event TEXT PRIMARY KEY, proposal TEXT NOT NULL, accept INTEGER NOT NULL,
     actor TEXT NOT NULL, hlc TEXT NOT NULL);
   CREATE INDEX IF NOT EXISTS px_decisions_proposal ON px_decisions (proposal);
+`;
+
+/** C-431: the indexes on the columns joining added -- made once the constructor has added the columns to a database
+ *  from before them */
+export const INDEXES = `
+  CREATE INDEX IF NOT EXISTS px_items_home ON px_items (home, parent, position);
+  CREATE INDEX IF NOT EXISTS px_items_numbered ON px_items (home, handle);
+  CREATE INDEX IF NOT EXISTS px_items_kinds ON px_items (home, kind, phase);
+  CREATE INDEX IF NOT EXISTS px_spaces_home ON px_spaces (home);
 `;
 
 /** every table folded from the log -- emptied and refilled by a rebuild, and compared by the convergence tests */

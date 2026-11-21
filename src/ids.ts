@@ -111,6 +111,8 @@ export function sha256(data: Uint8Array | string): Uint8Array {
 }
 
 export const sha256hex = (data: Uint8Array | string) => Array.from(sha256(data), (x) => HEX[x]).join("");
+/** C-431: a SHA-256 as hex -- a blob's name (blobs.ts) */
+export const HASH = /^[0-9a-f]{64}$/;
 
 /** An id made from what it names -- the same parts make the same id on every replica (a UUIDv8 over a SHA-256) */
 export function derivedId(...parts: string[]): string {

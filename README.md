@@ -37,19 +37,39 @@ to that.
 | a parent | a field; two moves that make a loop set the later aside (`tree()`) |
 | ARETE | awards and spends are entries, summed. An award's id comes from its item and key (`finish:1`), so two replicas that finish one step offline pay once. Undo takes it back, and finishing again pays once. A rule can say what a finish pays (`state(item, "done", { pay })`, under its own cap), and a finish paid nothing is still an entry, so every finish can be read from the ledger (`ledger(space, { since })`, each entry with its item's kind) |
 | a proposal | counts only once accepted; an accept anywhere takes it |
+| a join | a space joined to another (`join(space, into)`, C-431) is read there: its items numbered by that space's keeper, each keeping every number it had (`handle`, then `handle.<home>`), its ARETE and proposals counted there. Its events stay its own. Two joins that make a loop are read with the loop's earliest-made space as their home |
 
 ## Sync
 
 `have()` says what a replica has seen (per space, the latest time from each replica). `missing(have)` is what the
 other lacks, and `receive(events)` takes it. `sync(a, b)` runs the exchange both ways over any `Peer`, so the transport
-does not matter. A space whose reach is `phone` is never sent. Which replicas may exchange which spaces, and blobs,
-come in C-431.
+does not matter: HTTP, a relay, Bluetooth, a file carried by hand. `push(from, to)` runs it one way (C-431: a phone that
+hosted alone hands what it made to a hub). A space whose reach is `phone` is never sent, and `reaches` narrows the rest.
+
+- **A phone that hosted alone joins a hub and loses nothing.** It pushes its spaces; the hub joins the phone's LIFE to
+  its own (`join`), and from then on reads one LIFE, every number and every ARETE kept.
+- **A clock set wrong cannot drag the others.** A time more than `AHEAD` (a day, `Options.ahead`) past this replica's
+  clock is not taken yet (`Received.ahead`); it is offered again at the next exchange, and taken once the clock catches
+  up.
+- **Blobs** (`src/blobs.ts`): every binary is kept under its SHA-256, in a `BlobStore` the app provides (a folder, the
+  phone's documents, memory). A field of type `blob` names one; `blobs(spaces)` lists every one a replica's spaces name.
+  `local(px, store)` makes a Praxis and its store one side of an exchange, and `sync` then moves every blob one side
+  names and the other holds, checked against its name before it is kept -- so any replica that holds a blob can serve
+  it. Which replicas may exchange which spaces (membership) is still the transport's to decide.
 
 ## The event format
 
 Replicas run different builds: a phone on last month's release syncs with a hub on today's. So **every event carries
-its format as `v`** (`FORMAT` in `src/events.ts`; it is 1). An event without one is format 1, which is what the engine
-wrote before the field, and a log from then is given the column, every event at 1, the first time it is opened.
+its format as `v`** (`FORMAT` in `src/events.ts`, the newest this build reads: 2). An event without one is format 1,
+which is what the engine wrote before the field, and a log from then is given the column, every event at 1, the first
+time it is opened. **An event is written in the oldest format that reads it as it is meant** (`formatFor`), not always
+the newest, so a build that reads only format 1 still folds every change but those format 2 added: a join, and the
+numbers a home gives the items joined to it. An event claiming an older format than its change needs is refused.
+
+| Format | Since | What it added |
+|---|---|---|
+| 1 | C-429, v0.1.0 | everything else |
+| 2 | C-431, v0.2.0 | `joined` on a space, `handle.<home>` on an item |
 
 - **A build folds every format up to its own.** An event of a newer format is checked as far as its **envelope** (`v`,
   `id`, `space`, `item`, `op`, `field`, `actor`, `replica`, `hlc`), **kept and sent on as it came, but not folded**.
@@ -59,7 +79,7 @@ wrote before the field, and a log from then is given the column, every event at 
   to an older build folds again without it. The format of the build that last opened a database is in `px_meta`.
 - **The envelope never changes.** A new format may change what an event says -- a new op, a new field, a new value --
   and puts anything new inside `value`. Raise `FORMAT` in the same commit as any change an older build would fold
-  wrongly, and say so in the tag's notes.
+  wrongly, teach `formatFor` which changes need it, and say so in the tag's notes and the table above.
 
 `test/format.test.ts` runs an older and a newer build against one database.
 
@@ -68,7 +88,7 @@ wrote before the field, and a log from then is given the column, every event at 
 In an app's `package.json`, pinned by tag:
 
 ```json
-"dependencies": { "@daemons/praxis": "git+https://github.com/CodeMusic/daemons-praxis.git#v0.1.0" }
+"dependencies": { "@daemons/praxis": "git+https://github.com/CodeMusic/daemons-praxis.git#v0.2.0" }
 ```
 
 ```ts

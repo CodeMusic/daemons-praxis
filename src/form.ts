@@ -3,6 +3,8 @@
 // its FIELDS and STATES, and the views, rules and rewards (kept as they are here; C-430 and after read them). A space
 // keeps its form as a field of its own, so taking a newer version is an event like any other.
 
+import { HASH } from "./ids.js";
+
 export const PHASES = ["open", "doing", "done", "aside"] as const;   // a state is one of four -- never "failed"
 export type Phase = typeof PHASES[number];
 
@@ -80,6 +82,7 @@ export function checkValue(fd: FieldDef, v: unknown): string | null {
     case "rating": return typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 5 ? null : "a rating, 0 to 5";
     case "choice": return typeof v === "string" && fd.choices!.includes(v) ? null : `one of ${fd.choices!.join(", ")}`;
     case "date": return typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v) ? null : "a date, YYYY-MM-DD";
+    case "blob": return typeof v === "string" && HASH.test(v) ? null : "a blob's SHA-256, as hex (blobs.ts)";   // C-431
     default: return typeof v === "string" ? null : "text";
   }
 }

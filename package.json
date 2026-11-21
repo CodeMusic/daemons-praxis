@@ -1,6 +1,6 @@
 {
   "name": "@daemons/praxis",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "PRAXIS's engine: an append-only event log folded into tables, merged across replicas (C-429), for the DAEMONS companion.",
   "repository": {

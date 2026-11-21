@@ -3,18 +3,19 @@ import { sync, type Praxis } from "../src/index.js";
 import { ENGINES, LIFE, replica, seeded, Wall } from "./helpers.js";
 
 // The fold's one promise: replicas that have seen the same events hold the same tables and the same ARETE, whatever
-// order the events came in. Three replicas (their clocks skewed) change two spaces at random and exchange at random;
-// at the end every one must match, and so must fresh replicas fed every event one at a time in shuffled orders.
+// order the events came in. Three replicas (their clocks skewed) change two spaces at random and exchange at random --
+// joining either to the other, and undoing it (C-431), as they go; at the end every one must match, and so must fresh
+// replicas fed every event one at a time in shuffled orders.
 
 type Rand = ReturnType<typeof seeded>;
 
 function act(px: Praxis, r: Rand) {
   const space = r.pick(px.spaces()).id;
   const form = px.space(space)!.form!;
-  const items = px.items(space);
+  const items = px.items(px.space(space)!.home);              // read where it is read: in its home, if it was joined
   const any = () => r.pick(items).id;
   const statesOf = (id: string) => form.kinds[px.item(id)!.kind].states.map((s) => s.name);
-  switch (r.int(19)) {
+  switch (r.int(20)) {
     case 0: case 1: case 2:
       px.make(space, r.pick(["goal", "milestone", "step", "page"]), { title: `t${r.int(1000)}` },
         { parent: items.length && r.next() < 0.7 ? any() : null });
@@ -68,6 +69,11 @@ function act(px: Praxis, r: Rand) {
       if (r.next() < 0.5) px.adopt(space, { ...LIFE, version: 2 + r.int(50), kinds: { ...LIFE.kinds, step: { ...LIFE.kinds.step, points: r.int(4) } } });
       else px.setSpace(space, "title", `space ${r.int(100)}`);
       break;
+    case 19: {                                                 // C-431: a join, or one undone (a loop made here is refused)
+      const other = r.pick(px.spaces().filter((s) => s.id !== space)).id;
+      px.join(space, r.next() < 0.35 ? null : other);
+      break;
+    }
   }
 }
 
@@ -95,6 +101,7 @@ describe.each(ENGINES)("convergence on %s", (_, make) => {
     for (const x of reps.slice(1)) expect(x.tables()).toEqual(t0);
     expect(new Set(reps.map((x) => x.arete())).size).toBe(1);
     expect(t0.px_events.length).toBeGreaterThan(300);
+    expect(t0.px_events.filter((e) => e.includes('"field":"joined"')).length).toBeGreaterThan(5);   // C-431: it joined, often
 
     // a replica that hears every event one at a time, in any order, folds the same tables
     const events = reps[0].missing({});
