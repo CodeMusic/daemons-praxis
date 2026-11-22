@@ -109,6 +109,11 @@ ESM does, so a bundler is told to resolve that to `x.ts`. **tsx and vitest** do 
 The companion's GOALS are the first use (`server/src/goals.ts`, C-430): a LIFE space, its form's rules paying ARETE
 under daily caps, behind the routes the app and the boards already call.
 
+**WORKING MEMORY** (`src/working.ts`, C-469, v0.4.0) is the one form the package carries itself, so every app reads it
+alike: what a daemon has in mind now. `hold()` keeps about seven (`SPAN`), each about one thing and rewritten when held
+again; a new one lets go the least rehearsed (`rehearse()` keeps one), and `letGo()` clears them, as the night does once
+it has made its memory. Nothing is paid for holding.
+
 ## Test
 
 Node 22.13 or later: `npm install`, then `npm test` and `npm run typecheck` (GitHub runs both at every push). Every

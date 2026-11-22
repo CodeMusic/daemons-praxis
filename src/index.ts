@@ -12,3 +12,4 @@ export { CORE, FIELD_TYPES, LINK_TYPES, PHASES, PREFIX, SHORT, checkForm, type F
 export { Clock, hlcIso, hlcString, parseHlc, type Hlc } from "./hlc.js";
 export { cryptoRandom, derivedId, HASH, sha256, sha256hex, utf8, uuidTime, uuidv7, type Random } from "./ids.js";
 export { between } from "./position.js";
+export { hold, inMind, letGo, rehearse, SPAN, WORKING_MEMORY } from "./working.js";
