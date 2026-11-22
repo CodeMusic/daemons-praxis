@@ -216,6 +216,8 @@ describe("a household's keys", () => {
     expect(unwrapKeys(ring, newKey(seeded(6).bytes), chacha)).toBeNull();
     expect(keyringName(wrapping)).toMatch(/^[0-9a-f]{64}$/);
     expect(keyringName(wrapping)).not.toBe(keyringName(newKey(seeded(6).bytes)));
+    expect(keyringName(wrapping, 1)).not.toBe(keyringName(wrapping, 0));
+    expect(keyringName(wrapping)).toBe(keyringName(wrapping, 0));
     const sealedPeer = sealed({ have: () => ({}), missing: () => [] as PxEvent[], receive: () => ({ applied: 0, known: 0, rejected: 0, newer: 0, ahead: 0 }) },
       { keys, cipher: chacha });
     expect(sealedPeer.unread).toBe(0);

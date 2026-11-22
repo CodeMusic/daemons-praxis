@@ -282,8 +282,11 @@ export async function syncSealed(near: Peer & Partial<BlobPeer>, far: Peer & Par
 // ---- a household's keys, wrapped -------------------------------------------------------------------------------------
 
 const ringAd = utf8("praxis-keyring-1");
-/** the name a keyring is kept under at a relay: made from the key that wraps it, so only its holder can ask for it */
-export const keyringName = (wrapping: Uint8Array) => sha256hex(join(utf8("praxis-keyring-name-1|"), wrapping));
+/** the name a keyring is kept under at a relay: made from the key that wraps it, so only its holder can ask for it. A
+ *  relay keeps a name's bytes for good, so a keyring that grows (a new space, a new key) is kept again as the next
+ *  generation, and the newest is the last one a relay holds. */
+export const keyringName = (wrapping: Uint8Array, generation = 0) =>
+  sha256hex(join(utf8(`praxis-keyring-name-1|${generation}|`), wrapping));
 
 /** every space key a household holds, sealed under one wrapping key (the app derives it from a recovery code) */
 export function wrapKeys(keys: ReadonlyMap<string, Uint8Array>, wrapping: Uint8Array, cipher: Cipher, random: Random = cryptoRandom): Uint8Array {

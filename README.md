@@ -76,7 +76,8 @@ wrote it, its time, and its id. The box is bound to that open part, so it cannot
 - **Blobs** are sealed under the key of a space that names them and kept under `sealedName(key, hash)`, a name that says
   nothing of the blob's own hash. One is taken back only if it opens and is what its hash says.
 - **The keys travel wrapped.** `wrapKeys(keys, wrapping)` seals every space key a household holds under one key (the
-  app derives it from a recovery code), kept at the relay under `keyringName(wrapping)`; `unwrapKeys` opens it.
+  app derives it from a recovery code), kept at the relay under `keyringName(wrapping, generation)` -- a relay keeps a name's bytes for good, so a keyring
+  that grows is kept again as the next generation -- and `unwrapKeys` opens it.
 - **The cipher is the app's**, since this package imports nothing: an AEAD such as ChaCha20-Poly1305 (`Cipher`, with
   its nonce length). The nonce is made here and travels at the front of the box.
 
