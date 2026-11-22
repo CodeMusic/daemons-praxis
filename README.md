@@ -22,6 +22,8 @@ to that.
   change made after reading another always comes later, even from a slow clock.
 - **SPACES, KINDS, STATES, FIELDS and FORMS.** A space is made from a form (data: kinds, each with states in four
   phases, open, doing, done and aside, and typed fields). Taking a newer form is an event.
+- **A note may say when it was written** (`note(item, text, { at })`, v0.3.0), for one brought in from elsewhere: EUDAIMONIA's
+  mirror of Redmine keeps each journal's own time this way. A note made here has none; it was written when it was kept.
 - **Handles** (`LIFE-12`) are numbered by the space's keeper, provisional (`LIFE-~a3f2`) until then, kept once given. A
   kind with a `prefix` of its own is numbered on its own (`STEP-17`; kinds sharing a prefix share its numbers), and the
   keeper may give an item a chosen number as it is made (`make(..., { number })`), so items brought in from elsewhere

@@ -6,7 +6,7 @@ export type { By, Effort, Entry, Have, Item, Link, Node, Note, Options, Proposal
 export { local, moveBlobs, push, sync, type Exchange, type Peer } from "./exchange.js";
 export { keepBlob, memoryBlobs, takeBlob, type BlobPeer, type BlobStore, type Hasher } from "./blobs.js";
 export { fromExpo, type Db, type ExpoDatabase, type Statement } from "./db.js";
-export { FORMAT, OPS, PROPOSABLE, checkEnvelope, checkEvent, formatFor, formatOf, isLong, type Long, type Op, type PxEvent } from "./events.js";
+export { AT, FORMAT, OPS, PROPOSABLE, checkEnvelope, checkEvent, formatFor, formatOf, isLong, type Long, type Op, type PxEvent } from "./events.js";
 export { CORE, FIELD_TYPES, LINK_TYPES, PHASES, PREFIX, SHORT, checkForm, type FieldDef, type FieldType, type Form, type KindDef,
   type Phase, type StateDef } from "./form.js";
 export { Clock, hlcIso, hlcString, parseHlc, type Hlc } from "./hlc.js";

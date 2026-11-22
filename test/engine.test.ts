@@ -122,6 +122,18 @@ describe.each(ENGINES)("the engine on %s", (_, make) => {
     expect(px.efforts(s).reduce((t, e) => t + e.seconds, 0)).toBe(2400);
   });
 
+  it("keeps when a note brought in from elsewhere was written (v0.3.0)", () => {
+    const { px, life } = fresh();
+    const s = px.make(life, "step", { title: "Imported" });
+    px.note(s, "from the old tracker", { at: "2026-11-21T16:04:29Z", actor: "lane:playground" });
+    px.note(s, "written here");
+    expect(px.notes(s).map((n) => [n.text, n.at, n.actor])).toEqual([
+      ["from the old tracker", "2026-11-21T16:04:29Z", "lane:playground"], ["written here", null, "me"]]);
+    expect(() => px.note(s, "when?", { at: "yesterday" })).toThrow(/a time/);
+    px.rebuild();
+    expect(px.notes(s)[0].at).toBe("2026-11-21T16:04:29Z");
+  });
+
   it("moves items among their siblings and under others", () => {
     const { px, life } = fresh();
     const g = px.make(life, "goal", { title: "G" });

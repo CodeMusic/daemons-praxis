@@ -16,7 +16,7 @@
 // Sync is the exchange at the end of this file: "here is what I have seen; send me the rest" (exchange.ts runs it).
 
 import type { Db, Statement } from "./db.js";
-import { checkChange, checkEnvelope, checkEvent, FORMAT, formatFor, formatOf, isLong, NAME, PROPOSABLE, type Op, type PxEvent } from "./events.js";
+import { AT, checkChange, checkEnvelope, checkEvent, FORMAT, formatFor, formatOf, isLong, NAME, PROPOSABLE, type Op, type PxEvent } from "./events.js";
 import { checkForm, checkValue, CORE, LINK_TYPES, PREFIX, SHORT, type Form, type Phase } from "./form.js";
 import { Clock, hlcIso, parseHlc } from "./hlc.js";
 import { cryptoRandom, derivedId, HASH, uuidv7, type Random } from "./ids.js";
@@ -59,7 +59,7 @@ export interface Node { item: Item; children: Node[] }
 export interface Link { id: string; item: string; type: string; to: string; actor: string; hlc: string }
 export interface Write { value: unknown; hlc: string; event: string; actor: string; won: boolean }
 export interface Version { text: string; hlc: string; event: string; actor: string }
-export interface Note { id: string; text: string; actor: string; hlc: string }
+export interface Note { id: string; text: string; actor: string; hlc: string; at: string | null }
 export interface Effort { id: string; seconds: number; note: string | null; actor: string; hlc: string }
 export interface Entry {
   id: string; space: string; item: string; op: "award" | "spend"; key: string; points: number; reason: string | null;
@@ -120,6 +120,9 @@ export class Praxis {
     const homeless = !(db.prepare("PRAGMA table_info(px_items)").all() as Row[]).some((c) => c.name === "home");
     if (homeless) db.exec("ALTER TABLE px_spaces ADD COLUMN joined TEXT; ALTER TABLE px_spaces ADD COLUMN home TEXT NOT NULL DEFAULT ''; " +
       "ALTER TABLE px_items ADD COLUMN home TEXT NOT NULL DEFAULT ''");
+    // v0.3.0: notes from before a note could say when it was written -- the column added, and the fold made again
+    const undated = !(db.prepare("PRAGMA table_info(px_notes)").all() as Row[]).some((c) => c.name === "at");
+    if (undated) db.exec("ALTER TABLE px_notes ADD COLUMN at TEXT");
     db.exec(INDEXES);
     const now = opts.now ?? Date.now;
     this.now = now;
@@ -142,7 +145,7 @@ export class Praxis {
     const was = Number(noted ?? 1);    // a database from before the format was noted was opened by a format 1 build
     const moved = was !== FORMAT && !!this.one("SELECT 1 FROM px_events WHERE v > ? LIMIT 1", Math.min(was, FORMAT));
     if (noted !== String(FORMAT)) this.run("INSERT OR REPLACE INTO px_meta (key, value) VALUES ('format', ?)", String(FORMAT));
-    if (before || moved || homeless) this.rebuild();
+    if (before || moved || homeless || undated) this.rebuild();
   }
 
   // ---- the database --------------------------------------------------------------------------------------------------
@@ -207,7 +210,8 @@ export class Praxis {
         this.first("px_links", ["id", "space", "item", "type", "target", "actor", "hlc"], [e.id, e.space, e.item, v.type, v.to, e.actor, e.hlc]);
         return;
       case "unlink": this.first("px_unlinks", ["link", "event", "actor", "hlc"], [v.link, e.id, e.actor, e.hlc]); return;
-      case "note": this.first("px_notes", ["id", "space", "item", "text", "actor", "hlc"], [e.id, e.space, e.item, v.text, e.actor, e.hlc]); return;
+      case "note": this.first("px_notes", ["id", "space", "item", "text", "actor", "hlc", "at"],
+        [e.id, e.space, e.item, v.text, e.actor, e.hlc, typeof v.at === "string" ? v.at : null]); return;
       case "effort":
         this.first("px_efforts", ["id", "space", "item", "seconds", "note", "actor", "hlc"],
           [e.id, e.space, e.item, v.seconds, str(v.note), e.actor, e.hlc]);
@@ -506,7 +510,7 @@ export class Praxis {
 
   notes(item: string): Note[] {
     return this.all("SELECT * FROM px_notes WHERE item = ? ORDER BY hlc, id", item)
-      .map((r) => ({ id: r.id, text: r.text, actor: r.actor, hlc: r.hlc }));
+      .map((r) => ({ id: r.id, text: r.text, actor: r.actor, hlc: r.hlc, at: r.at ?? null }));
   }
 
   efforts(item: string): Effort[] {
@@ -771,9 +775,12 @@ export class Praxis {
     });
   }
 
-  note(item: string, text: string, o: By = {}): string {
+  /** a note on an item; its id. `at` (v0.3.0): when it was written, for a note brought in from elsewhere (a ticket's
+   *  journal) -- a note made here was written when it was kept, and has none */
+  note(item: string, text: string, o: { at?: string } & By = {}): string {
     if (!text.trim()) throw new Error("a note needs words");
-    return this.transaction(() => this.emit(this.must(item).space, item, "note", undefined, { text }, o.actor).id);
+    if (o.at !== undefined && !AT.test(o.at)) throw new Error("a note's at is a time, 2026-11-22T04:10:00Z");
+    return this.transaction(() => this.emit(this.must(item).space, item, "note", undefined, o.at === undefined ? { text } : { text, at: o.at }, o.actor).id);
   }
 
   /** EFFORT: time given to an item */

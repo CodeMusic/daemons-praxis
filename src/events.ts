@@ -55,7 +55,7 @@ export interface PxEvent {
 //  move     { parent, position }
 //  state    the state's name                                archive   true or false
 //  link     { type, to }                                    unlink    { link }: the link event it takes away
-//  note     { text }                                        effort    { seconds, note? }
+//  note     { text, at? }                                     effort    { seconds, note? }
 //  award, spend   { points, reason? }, or { back: true } to take the entry with that key back
 //  propose  { op, field?, value? }: the change proposed     accept, decline   { proposal }
 
@@ -67,6 +67,8 @@ export const isLong = (v: unknown): v is Long => typeof v === "object" && v !== 
 
 export const NAME = /^[\w.:@-]{1,64}$/;            // a replica, an actor, a field, a kind, a state, a key
 export const POSITION = /^[0-9A-Za-z]{0,1023}[1-9A-Za-z]$/;   // position.ts's keys, which never end in "0"
+/** a time a note says it was written (v0.3.0): an ISO 8601 date and time, with its zone */
+export const AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
 const obj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const str = (v: unknown) => typeof v === "string";
 const points = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 1e9;
@@ -86,7 +88,8 @@ export function checkChange(op: Op, field: unknown, value: unknown): string | nu
     case "archive": return typeof value === "boolean" ? null : "archive needs true or false";
     case "link": return obj(value) && str(value.type) && NAME.test(value.type as string) && str(value.to) ? null : "link needs { type, to }";
     case "unlink": return obj(value) && str(value.link) ? null : "unlink needs { link }";
-    case "note": return obj(value) && str(value.text) ? null : "note needs { text }";
+    case "note": return obj(value) && str(value.text) && (value.at === undefined || (typeof value.at === "string" && AT.test(value.at)))
+      ? null : "note needs { text, at? }, at a time (2026-11-22T04:10:00Z)";
     case "effort": return obj(value) && typeof value.seconds === "number" && Number.isFinite(value.seconds)
       ? null : "effort needs { seconds }";
     case "award": case "spend":

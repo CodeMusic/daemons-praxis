@@ -53,8 +53,9 @@ export const SCHEMA = `
   CREATE TABLE IF NOT EXISTS px_unlinks (link TEXT PRIMARY KEY, event TEXT NOT NULL, actor TEXT NOT NULL, hlc TEXT NOT NULL);
 
   -- notes and EFFORT, add-only
+  -- a note's at (v0.3.0) is when it was written, when that is not when it was kept: one brought in from elsewhere
   CREATE TABLE IF NOT EXISTS px_notes (id TEXT PRIMARY KEY, space TEXT NOT NULL, item TEXT NOT NULL, text TEXT NOT NULL,
-    actor TEXT NOT NULL, hlc TEXT NOT NULL);
+    actor TEXT NOT NULL, hlc TEXT NOT NULL, at TEXT);
   CREATE INDEX IF NOT EXISTS px_notes_item ON px_notes (item);
   CREATE TABLE IF NOT EXISTS px_efforts (id TEXT PRIMARY KEY, space TEXT NOT NULL, item TEXT NOT NULL, seconds REAL NOT NULL,
     note TEXT, actor TEXT NOT NULL, hlc TEXT NOT NULL);
