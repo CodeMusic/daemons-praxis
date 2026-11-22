@@ -101,7 +101,8 @@ const step = px.make(life, "step", { title: "Water the seedlings" });
 px.state(step, "done");                    // pays the step's ARETE, once
 ```
 
-The package is TypeScript source (`src/`); nothing is compiled. Its files import each other as `./x.js`, as Node's
+The package is TypeScript source (`src/`); nothing is compiled. It uses **only syntax a type stripper can erase**
+(`erasableSyntaxOnly`, v0.3.1: no parameter properties, enums or namespaces), so Node's own type stripping can load it. Its files import each other as `./x.js`, as Node's
 ESM does, so a bundler is told to resolve that to `x.ts`. **tsx and vitest** do it already. **Metro** needs a line in
 `metro.config.js`'s `resolveRequest` (the companion's `app/metro.config.js` has it).
 

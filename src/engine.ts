@@ -108,7 +108,9 @@ export class Praxis {
   private readonly statements = new Map<string, Statement>();
   private depth = 0;
 
-  constructor(readonly db: Db, opts: Options = {}) {
+  readonly db: Db;
+  constructor(db: Db, opts: Options = {}) {
+    this.db = db;
     db.exec(SCHEMA);
     // C-430: px_kinds from before kinds had prefixes -- the column added, and the fold made again to fill it
     const before = !(db.prepare("PRAGMA table_info(px_kinds)").all() as Row[]).some((c) => c.name === "prefix");

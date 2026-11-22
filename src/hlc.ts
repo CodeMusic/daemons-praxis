@@ -27,7 +27,9 @@ export const hlcIso = (h: string) => new Date(parseHlc(h)?.ms ?? 0).toISOString(
 export class Clock {
   private ms = 0;
   private count = 0;
-  constructor(readonly replica: string, private readonly now: () => number = Date.now) {}
+  readonly replica: string;
+  private readonly now: () => number;
+  constructor(replica: string, now: () => number = Date.now) { this.replica = replica; this.now = now; }
 
   /** a time later than every time this clock has made or seen */
   tick(): string {
