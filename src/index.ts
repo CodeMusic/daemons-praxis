@@ -13,3 +13,5 @@ export { Clock, hlcIso, hlcString, parseHlc, type Hlc } from "./hlc.js";
 export { cryptoRandom, derivedId, HASH, sha256, sha256hex, utf8, uuidTime, uuidv7, type Random } from "./ids.js";
 export { between } from "./position.js";
 export { hold, inMind, letGo, rehearse, SPAN, WORKING_MEMORY } from "./working.js";
+export { fromBase64, fromUtf8, isSealed, KEY_BYTES, keepSealed, keyringName, newKey, openBlob, openEvent, SEALED, SEALED_OP, sealBlob,
+  sealed, sealedName, sealEvent, syncSealed, toBase64, unwrapKeys, wrapKeys, type Cipher, type Sealing } from "./seal.js";

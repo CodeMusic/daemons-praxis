@@ -59,6 +59,27 @@ hosted alone hands what it made to a hub). A space whose reach is `phone` is nev
   names and the other holds, checked against its name before it is kept -- so any replica that holds a blob can serve
   it. Which replicas may exchange which spaces (membership) is still the transport's to decide.
 
+## Sealed spaces
+
+A replica can keep a space's events and blobs **without reading them** (C-434: a relay, a backup in a cloud;
+`src/seal.ts`). Each space has a key (`newKey()`). `sealEvent` puts an event's item, op, field, value and actor inside
+a box sealed under it, and leaves open only what an exchange needs to say what it has seen: the space, the replica that
+wrote it, its time, and its id. The box is bound to that open part, so it cannot be moved to another event.
+
+- **The relay is an ordinary Praxis.** A sealed event is of format `SEALED` (a million), which no build will ever read,
+  so every build keeps it, orders it and passes it on as it came, never folding it (the same rule as any newer format).
+  A relay needs no code of its own for events, and `keepSealed(store)` keeps sealed blobs as they are given.
+- **A keyed replica sees a relay through `sealed(far, { keys, cipher, named })`**: what it sends is sealed first, what
+  it is sent is opened. Only the spaces it holds keys of are asked for. An event its key will not open is never taken,
+  nor any later one of the same replica in that space, so what it holds is never missing a middle (`unread` counts
+  them). `syncSealed(near, far, sealing)` is `sync` through it.
+- **Blobs** are sealed under the key of a space that names them and kept under `sealedName(key, hash)`, a name that says
+  nothing of the blob's own hash. One is taken back only if it opens and is what its hash says.
+- **The keys travel wrapped.** `wrapKeys(keys, wrapping)` seals every space key a household holds under one key (the
+  app derives it from a recovery code), kept at the relay under `keyringName(wrapping)`; `unwrapKeys` opens it.
+- **The cipher is the app's**, since this package imports nothing: an AEAD such as ChaCha20-Poly1305 (`Cipher`, with
+  its nonce length). The nonce is made here and travels at the front of the box.
+
 ## The event format
 
 Replicas run different builds: a phone on last month's release syncs with a hub on today's. So **every event carries
